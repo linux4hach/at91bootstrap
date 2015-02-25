@@ -40,15 +40,20 @@
 /* Manufacturer Device ID Read */
 #define CMD_READ_DEV_ID			0x9f
 /* Continuous Array Read */
+#define CMD_READ_ARRAY_SLOW		0x03
 #define CMD_READ_ARRAY_FAST		0x0b
 
 /* JEDEC Code */
 #define MANUFACTURER_ID_ATMEL		0x1f
-
+#define MANUFACTURER_ID_SPANSION    	0x01
+#define MANUFACTURER_ID_MICRON      	0x20
 /* Family Code */
 #define DF_FAMILY_AT26F			0x00
 #define DF_FAMILY_AT45			0x20
 #define DF_FAMILY_AT26DF		0x40	/* AT25DF and AT26DF */
+
+#define	DF_FAMILY_S25FL512S		0x02
+#define DF_FAMILY_N25Q          	0xBA
 
 /* AT45 Density Code */
 #define DENSITY_AT45DB011D		0x0C
@@ -62,12 +67,42 @@
 #define DENSITY_AT45DB2562D		0x18
 #define DENSITY_AT45DB5122D		0x20
 
+#define	DENSITY_S25FL512S		0x20
+#define DENSITY_N25Q00          	0x21
+
 /* AT45 Status Register Read */
 #define CMD_READ_STATUS_AT45		0xd7
+
+
+/* Common commands */
+
+#define CMD_WRITE_STATUS		0x01
+#define CMD_PAGE_PROGRAM		0x02
+#define CMD_WRITE_DISABLE		0x04
+#define CMD_READ_STATUS			0x05
+#define CMD_WRITE_ENABLE		0x06
+#define CMD_ERASE_4K			0x20
+#define CMD_ERASE_32K			0x52
+#define CMD_ERASE_64K			0xd8
+#define CMD_ERASE_CHIP			0xc7
+#define CMD_FLAG_STATUS			0x70
+
+/* Common status */
+#define STATUS_WIP			0x01
 
 /* AT45 status register bits */
 #define STATUS_PAGE_SIZE_AT45		(1 << 0)
 #define STATUS_READY_AT45		(1 << 7)
+
+#define CMD_READ_STATUS_SPSN	    	CMD_READ_STATUS
+#define STATUS_READY_SPSN		STATUS_WIP
+#define CMD_ERASE_SECTOR_SPSN       	CMD_ERASE_64K
+#define CMD_WRITE_ENABLE_SPSN       	CMD_WRITE_ENABLE
+
+#define CMD_READ_STATUS_MICRON	    	CMD_FLAG_STATUS
+#define STATUS_READY_MICRON	    	(1 << 7)
+#define CMD_ERASE_SECTOR_MICRON     	CMD_ERASE_64K
+#define CMD_WRITE_ENABLE_MICRON     	CMD_WRITE_ENABLE
 
 struct dataflash_descriptor;
 
@@ -141,23 +176,36 @@ static int dataflash_read_array(struct dataflash_descriptor *df_desc,
 	} else
 		address = offset;
 
-	cmd[0] = CMD_READ_ARRAY_FAST;
-	if (df_desc->pages > 16384) {
-		cmd[1] = (unsigned char)(address >> 24);
-		cmd[2] = (unsigned char)(address >> 16);
-		cmd[3] = (unsigned char)(address >> 8);
-		cmd[4] = (unsigned char)address;
-
-	} else {
+	if(df_desc->family == DF_FAMILY_S25FL512S || df_desc->family == DF_FAMILY_N25Q) {
+		cmd[0] = CMD_READ_ARRAY_FAST;
 		cmd[1] = (unsigned char)(address >> 16);
 		cmd[2] = (unsigned char)(address >> 8);
 		cmd[3] = (unsigned char)address;
 		cmd[4] = 0x00;
+
+		cmd_len = 5;
+
+		ret = df_send_command(cmd, cmd_len, buf, len);
 	}
+	else {
+		cmd[0] = CMD_READ_ARRAY_FAST;
+		if (df_desc->pages > 16384) {
+			cmd[1] = (unsigned char)(address >> 24);
+			cmd[2] = (unsigned char)(address >> 16);
+			cmd[3] = (unsigned char)(address >> 8);
+			cmd[4] = (unsigned char)address;
 
-	cmd_len = 5;
+		} else {
+			cmd[1] = (unsigned char)(address >> 16);
+			cmd[2] = (unsigned char)(address >> 8);
+			cmd[3] = (unsigned char)address;
+			cmd[4] = 0x00;
+		}
 
-	ret = df_send_command(cmd, cmd_len, buf, len);
+		cmd_len = 5;
+
+		ret = df_send_command(cmd, cmd_len, buf, len);
+	}
 	if (ret)
 		return -1;
 
@@ -199,7 +247,28 @@ static unsigned char df_read_status_at45(unsigned char *status)
 
 	return 0;
 }
+static unsigned char df_read_status_spsn(unsigned char *status)
+{
+	unsigned char cmd = CMD_READ_STATUS_SPSN;
+	int ret;
 
+	ret = df_send_command(&cmd, 1, status, 1);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+static unsigned char df_read_status_micron(unsigned char *status)
+{
+	unsigned char cmd = CMD_READ_STATUS_MICRON;
+	int ret;
+
+	ret = df_send_command(&cmd, 1, status, 1);
+	if (ret)
+		return ret;
+
+	return 0;
+}
 #ifdef CONFIG_DATAFLASH_RECOVERY
 
 /* AT25 Block Erase(4-KBytes) Command*/
@@ -391,6 +460,121 @@ static int dataflash_page0_erase_at45(void)
 
 	return 0;
 }
+static int spsn_cmd_write_enable(void)
+{
+	unsigned char cmd;
+	int ret;
+
+	cmd = CMD_WRITE_ENABLE_SPSN;
+	ret = df_send_command(&cmd, 1, NULL, 0);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+static int dataflash_sector0_erase_spsn(void)
+{
+	unsigned char status;
+	unsigned char cmd[5];
+	unsigned int timeout = 50000;
+	int ret;
+	/*
+	ret = spsn_unprotect();
+	if (ret)
+		return ret;
+	*/
+	ret = spsn_cmd_write_enable();
+	if (ret)
+		return ret;
+
+	/* Erase sector 0 */
+	cmd[0] = CMD_ERASE_SECTOR_SPSN;
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+
+	ret = df_send_command(cmd, 4, NULL, 0);
+	if (ret) {
+		dbg_info("SF: Spansion sector 0 erase failed\n");
+		return ret;
+	}
+
+	udelay(50000); /* 33 ms: the maximum delay of udelay() */
+
+	do {
+		ret = df_read_status_spsn(&status);
+		if (ret)
+			return ret;
+
+		if (!(status & STATUS_READY_SPSN))
+			break;
+	} while (--timeout);
+
+	if (!timeout) {
+		dbg_info("SF: Spansion sector 0 erase timed out\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int micron_cmd_write_enable(void)
+{
+	unsigned char cmd;
+	int ret;
+
+	cmd = CMD_WRITE_ENABLE_MICRON;
+	ret = df_send_command(&cmd, 1, NULL, 0);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+static int dataflash_sector0_erase_micron(void)
+{
+	unsigned char status;
+	unsigned char cmd[5];
+	unsigned int timeout = 50000;
+	int ret;
+	/*
+	ret = spsn_unprotect();
+	if (ret)
+		return ret;
+	*/
+	ret = micron_cmd_write_enable();
+	if (ret)
+		return ret;
+
+	/* Erase sector 0 */
+	cmd[0] = CMD_ERASE_SECTOR_MICRON;
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+
+	ret = df_send_command(cmd, 4, NULL, 0);
+	if (ret) {
+		dbg_info("SF: Micron sector 0 erase failed\n");
+		return ret;
+	}
+
+	udelay(50000); /* 33 ms: the maximum delay of udelay() */
+
+	do {
+		ret = df_read_status_micron(&status);
+		if (ret)
+			return ret;
+
+		if ((status & STATUS_READY_MICRON))
+			break;
+	} while (--timeout);
+
+	if (!timeout) {
+		dbg_info("SF: Micron sector 0 erase timed out\n");
+		return -1;
+	}
+
+	return 0;
+}
 
 static int dataflash_recovery(struct dataflash_descriptor *df_desc)
 {
@@ -411,7 +595,13 @@ static int dataflash_recovery(struct dataflash_descriptor *df_desc)
 		if ((df_desc->family == DF_FAMILY_AT26F)
 			|| (df_desc->family == DF_FAMILY_AT26DF))
 			ret = dataflash_page0_erase_at25();
-		 else
+
+		else if(df_desc->family == DF_FAMILY_S25FL512S)
+			ret = dataflash_sector0_erase_spsn();
+
+		else if(df_desc->family == DF_FAMILY_N25Q)
+				ret = dataflash_sector0_erase_micron();
+		else
 			ret = dataflash_page0_erase_at45();
 
 		if (ret) {
@@ -522,7 +712,28 @@ static int df_at25_desc_init(struct dataflash_descriptor *df_desc)
 
 	return 0;
 }
+static int df_spsn_desc_init(struct dataflash_descriptor *df_desc)
+{
 
+	df_desc->is_power_2 = 1;
+
+	df_desc->pages = 50000;
+	df_desc->page_size = 512;
+	df_desc->page_offset = 0;
+
+	return 0;
+}
+static int df_micron_desc_init(struct dataflash_descriptor *df_desc)
+{
+
+	df_desc->is_power_2 = 1;
+
+	df_desc->pages = 50000;
+	df_desc->page_size = 256;
+	df_desc->page_offset = 0;
+
+	return 0;
+}
 static int df_desc_init(struct dataflash_descriptor *df_desc,
 			unsigned char family)
 {
@@ -539,7 +750,17 @@ static int df_desc_init(struct dataflash_descriptor *df_desc,
 		ret = df_at45_desc_init(df_desc);
 		if (ret)
 			return ret;
-	} else {
+	} else if(df_desc->family == DF_FAMILY_S25FL512S) {
+		ret = df_spsn_desc_init(df_desc);
+		if (ret)
+			return ret;
+	} else if(df_desc->family == DF_FAMILY_N25Q) {
+		ret = df_micron_desc_init(df_desc);
+		if (ret)
+			return ret;
+	}
+
+	else {
 		dbg_info("SF: Unsupported SerialFlash family %d\n", family);
 		return -1;
 	}
@@ -568,13 +789,17 @@ static int dataflash_probe_atmel(struct dataflash_descriptor *df_desc)
 	dbg_info("\n");
 #endif
 
-	if (dev_id[0] != MANUFACTURER_ID_ATMEL) {
+	if ((dev_id[0] != MANUFACTURER_ID_ATMEL) && (dev_id[0] != MANUFACTURER_ID_SPANSION) && (dev_id[0] != MANUFACTURER_ID_MICRON)) {
 		dbg_info("Not supported spi flash Manufactorer ID: %d\n",
 				dev_id[0]);
 		return -1;
 	}
-
-	ret = df_desc_init(df_desc, (dev_id[1] & 0xe0));
+	if(dev_id[0] == MANUFACTURER_ID_ATMEL) 
+		ret = df_desc_init(df_desc, (dev_id[1] & 0xe0));
+	else if(dev_id[0] == MANUFACTURER_ID_SPANSION)
+		ret = df_desc_init(df_desc, dev_id[1]);
+	else if(dev_id[0] == MANUFACTURER_ID_MICRON)
+			ret = df_desc_init(df_desc, dev_id[1]);
 	if (ret)
 		return ret;
 
@@ -599,11 +824,13 @@ int load_dataflash(struct image_info *image)
 	at91_spi_enable();
 
 	ret = dataflash_probe_atmel(df_desc);
+	
 	if (ret) {
 		dbg_info("SF: Fail to probe atmel spi flash\n");
 		ret = -1;
 		goto err_exit;
 	}
+	
 
 #ifdef CONFIG_DATAFLASH_RECOVERY
 	if (!dataflash_recovery(df_desc)) {
@@ -626,6 +853,7 @@ int load_dataflash(struct image_info *image)
 
 	ret = dataflash_read_array(df_desc,
 			image->offset, image->length, image->dest);
+
 	if (ret) {
 		dbg_info("** SF: Serial flash read error**\n");
 		ret = -1;
@@ -648,6 +876,7 @@ int load_dataflash(struct image_info *image)
 
 		ret = dataflash_read_array(df_desc,
 			image->of_offset, image->of_length, image->of_dest);
+
 		if (ret) {
 			dbg_info("** SF: DT: Serial flash read error**\n");
 			ret = -1;
